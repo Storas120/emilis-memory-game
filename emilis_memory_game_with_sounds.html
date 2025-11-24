@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Emilis — Birthday Memory Game</title>
+<style>
+  :root{
+    --bg:#0f1724;
+    --card-back:#1f2937;
+    --card-front:#ffffff;
+    --accent:#f59e0b;
+    --muted:#94a3b8;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;
+    background: linear-gradient(180deg,#071124 0%, #0f1724 100%);
+    color:var(--card-front);
+    display:flex; align-items:center; justify-content:center; padding:20px;
+  }
+  .container{
+    width:100%; max-width:720px; margin:0 auto;
+    text-align:center;
+  }
+  header{margin-bottom:12px}
+  h1{margin:8px 0 0; font-size:20px}
+  p.lead{margin:6px 0 14px; color:var(--muted); font-size:14px}
+  .topbar{
+    display:flex; gap:8px; align-items:center; justify-content:space-between;
+    margin-bottom:12px;
+  }
+  .stats{display:flex; gap:10px; align-items:center; color:var(--muted); font-size:14px}
+  .btn{
+    background:transparent; border:1px solid rgba(255,255,255,0.08);
+    color:var(--card-front); padding:8px 12px; border-radius:10px; font-weight:600;
+    cursor:pointer; backdrop-filter: blur(4px);
+  }
+  .grid{
+    display:grid; gap:10px; 
+    grid-template-columns: repeat(4, minmax(0,1fr));
+    touch-action: manipulation;
+  }
+  @media (max-width:420px){
+    .grid{grid-template-columns: repeat(3, minmax(0,1fr)); gap:8px}
+  }
+
+  .card{
+    perspective:1000px; cursor:pointer; width:100%; height:0; padding-bottom:125%;
+    position:relative;
+  }
+  .inner{
+    position:absolute; inset:0; transition:transform 600ms cubic-bezier(.2,.9,.3,1);
+    transform-style:preserve-3d; border-radius:12px;
+  }
+  .flipped .inner{ transform: rotateY(180deg); }
+  .face{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    backface-visibility:hidden; border-radius:12px; font-size:40px;
+  }
+  .front{
+    background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(255,255,255,0.98));
+    color:#111827; transform: rotateY(180deg);
+    box-shadow: 0 6px 18px rgba(2,6,23,0.6), inset 0 -4px 8px rgba(0,0,0,0.06);
+    font-size:36px;
+  }
+  .back{
+    background: linear-gradient(180deg, rgba(20,25,35,0.9), rgba(12,18,28,0.95));
+    color:var(--card-front); font-size:28px;
+    display:flex; flex-direction:column; gap:6px;
+  }
+  .back .emoji{font-size:22px; opacity:0.95}
+  .back .title{font-size:12px; color:var(--muted)}
+  /* matched state */
+  .matched .inner{ transform: scale(1.03) rotateY(180deg); transition: transform 600ms, opacity 400ms; }
+  .matched{opacity:0.85; filter:brightness(1.06); box-shadow: 0 10px 30px rgba(0,0,0,0.45) inset;}
+  /* subtle pop on flip */
+  .pop{ animation:pop 450ms cubic-bezier(.2,.9,.3,1); }
+  @keyframes pop{
+    0%{ transform: scale(1) }
+    50%{ transform: scale(1.06) }
+    100%{ transform: scale(1) }
+  }
+
+  .footer{margin-top:12px; color:var(--muted); font-size:13px}
+  /* confetti canvas */
+  #confetti{ position:fixed; left:0; top:0; width:100%; height:100%; pointer-events:none; z-index:9999; }
+</style>
+</head>
+<body>
+<canvas id="confetti"></canvas>
+<div class="container" role="application" aria-label="Memory game">
+  <header>
+    <div style="display:flex;align-items:center;gap:12px;justify-content:center">
+      <div style="width:48px;height:48px;border-radius:10px;background:linear-gradient(180deg,#f97316,#fb923c);display:flex;align-items:center;justify-content:center;font-size:22px">🎂</div>
+      <div style="text-align:left">
+        <h1>Happy 10th Birthday — Emilis!</h1>
+        <p class="lead">Tap matching cards to reveal birthday emojis. Finish to unlock a surprise!</p>
+      </div>
+    </div>
+  </header>
+
+  <div class="topbar" aria-hidden="false">
+    <div class="stats">
+      <div id="moves">Moves: 0</div>
+      <div id="found">Pairs: 0/8</div>
+      <div id="time">Time: 0s</div>
+    </div>
+    <div>
+      <button id="restart" class="btn" aria-label="Restart game">Restart</button>
+    </div>
+  </div>
+
+  <main>
+    <section id="board" class="grid" aria-live="polite"></section>
+  </main>
+
+  <div class="footer">Built with 🎉 — tap cards quickly but carefully! Works on phones.</div>
+</div>
+
+<script>
+/* --- Game data --- */
+const EMOJIS = ["🎁","🎈","🎂","🕯️","🍰","🎉","⭐","🍭"];
+// double and shuffle
+let cards = shuffle([...EMOJIS, ...EMOJIS]);
+const board = document.getElementById('board');
+const movesEl = document.getElementById('moves');
+const foundEl = document.getElementById('found');
+const timeEl = document.getElementById('time');
+const restartBtn = document.getElementById('restart');
+
+let first = null, second = null;
+let lock = false;
+let moves = 0, found = 0;
+let timer = 0, timerInterval = null;
+
+/* Audio using WebAudio for chimes */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+function playTone(freq, duration = 0.12, type='sine'){
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type;
+  o.frequency.value = freq;
+  g.gain.value = 0.05;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start();
+  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+  o.stop(audioCtx.currentTime + duration + 0.02);
+}
+function playMatchSound(){
+  playTone(880, 0.12, 'sine');
+  setTimeout(()=>playTone(1100, 0.12, 'sine'), 120);
+}
+function playFlipSound(){
+  playTone(520, 0.08, 'triangle');
+}
+function playWinSound(){
+  playTone(660, 0.14, 'sine');
+  setTimeout(()=>playTone(880, 0.14, 'sine'), 140);
+  setTimeout(()=>playTone(1100, 0.14, 'sine'), 300);
+}
+
+/* --- build board --- */
+function buildBoard(){
+  board.innerHTML = '';
+  cards.forEach((emoji, idx) => {
+    const card = document.createElement('button');
+    card.className = 'card';
+    card.setAttribute('data-emoji', emoji);
+    card.setAttribute('aria-label', 'Card');
+    card.innerHTML = `
+      <div class="inner" role="img" aria-hidden="false">
+        <div class="face back">
+          <div style="text-align:center">
+            <div class="emoji">🎁</div>
+            <div class="title">Tap!</div>
+          </div>
+        </div>
+        <div class="face front">
+          <div class="emoji">${emoji}</div>
+        </div>
+      </div>
+    `;
+    card.addEventListener('click', () => onCardClick(card));
+    board.appendChild(card);
+  });
+}
+function onCardClick(card){
+  if (lock) return;
+  if (card.classList.contains('flipped') || card.classList.contains('matched')) return;
+  // start audio context on first user gesture if needed
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  card.classList.add('flipped','pop');
+  playFlipSound();
+  setTimeout(()=>card.classList.remove('pop'), 420);
+
+  if (!first){
+    first = card;
+    if (!timerInterval) startTimer();
+    return;
+  }
+  second = card;
+  lock = true;
+  moves++;
+  updateStats();
+
+  const a = first.getAttribute('data-emoji');
+  const b = second.getAttribute('data-emoji');
+  if (a === b){
+    // match
+    setTimeout(()=> {
+      first.classList.add('matched');
+      second.classList.add('matched');
+      first.setAttribute('aria-checked', 'true');
+      second.setAttribute('aria-checked', 'true');
+      playMatchSound();
+      found++;
+      resetSelection();
+      updateStats();
+      if (found === EMOJIS.length) onWin();
+    }, 600);
+  } else {
+    // not match -> flip back
+    setTimeout(()=> {
+      first.classList.remove('flipped');
+      second.classList.remove('flipped');
+      resetSelection();
+    }, 900);
+  }
+}
+
+function resetSelection(){
+  first = null; second = null; lock = false;
+}
+
+function updateStats(){
+  movesEl.textContent = `Moves: ${moves}`;
+  foundEl.textContent = `Pairs: ${found}/${EMOJIS.length}`;
+}
+
+function shuffle(a){
+  for(let i = a.length -1; i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/* --- timer --- */
+function startTimer(){
+  timerInterval = setInterval(()=> {
+    timer++;
+    timeEl.textContent = `Time: ${timer}s`;
+  }, 1000);
+}
+function stopTimer(){
+  clearInterval(timerInterval);
+  timerInterval = null;
+}
+
+/* --- win handling & confetti --- */
+function onWin(){
+  stopTimer();
+  playWinSound();
+  launchConfetti();
+  setTimeout(()=> {
+    showWinModal();
+  }, 800);
+}
+
+/* simple modal using alert-like card */
+function showWinModal(){
+  const overlay = document.createElement('div');
+  overlay.style.position='fixed';
+  overlay.style.left=0; overlay.style.top=0; overlay.style.right=0; overlay.style.bottom=0;
+  overlay.style.display='flex'; overlay.style.alignItems='center'; overlay.style.justifyContent='center';
+  overlay.style.background='rgba(2,6,23,0.6)'; overlay.style.zIndex=99999;
+  overlay.innerHTML = `
+    <div style="background:linear-gradient(180deg,#fff,#f8fafc);color:#0f1724;padding:18px;border-radius:14px;max-width:360px;text-align:center;box-shadow:0 12px 40px rgba(2,6,23,0.6)">
+      <div style="font-size:36px">🎉</div>
+      <h2 style="margin:8px 0 6px">You did it, Emilis!</h2>
+      <p style="margin:0 0 12px;color:#334155">Time: ${timer}s • Moves: ${moves}</p>
+      <p style="margin:10px 0 14px;font-weight:700">Happy 10th Birthday!</p>
+      <button id="closeWin" class="btn" style="padding:10px 14px;margin-right:8px">Play again</button>
+      <button id="closeShare" class="btn" style="padding:10px 14px">Keep</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  document.getElementById('closeWin').addEventListener('click', ()=> {
+    document.body.removeChild(overlay);
+    restartGame();
+  });
+  document.getElementById('closeShare').addEventListener('click', ()=> {
+    document.body.removeChild(overlay);
+  });
+}
+
+/* --- restart --- */
+function restartGame(){
+  // reset state
+  stopTimer();
+  timer = 0; moves = 0; found = 0;
+  first = second = null; lock = false;
+  movesEl.textContent = `Moves: 0`;
+  foundEl.textContent = `Pairs: 0/${EMOJIS.length}`;
+  timeEl.textContent = 'Time: 0s';
+  cards = shuffle([...EMOJIS, ...EMOJIS]);
+  buildBoard();
+}
+
+/* --- confetti generator (lightweight) --- */
+const confettiCanvas = document.getElementById('confetti');
+const ctx = confettiCanvas.getContext('2d');
+let confettiPieces = [];
+function resizeCanvas(){
+  confettiCanvas.width = window.innerWidth;
+  confettiCanvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+function launchConfetti(){
+  confettiPieces = [];
+  const count = 80;
+  for(let i=0;i<count;i++){
+    confettiPieces.push({
+      x: Math.random()*confettiCanvas.width,
+      y: Math.random()*-confettiCanvas.height,
+      r: (Math.random()*6)+4,
+      d: Math.random()*count,
+      tilt: Math.random()*15,
+      color: ['#f97316','#fb923c','#f59e0b','#ef4444','#10b981','#60a5fa'][Math.floor(Math.random()*6)],
+      tiltAngleIncrement: (Math.random()*0.07)+0.05,
+      tiltAngle: 0
+    });
+  }
+  (function anim(){
+    ctx.clearRect(0,0,confettiCanvas.width, confettiCanvas.height);
+    for(let i=0;i<confettiPieces.length;i++){
+      const p = confettiPieces[i];
+      p.tiltAngle += p.tiltAngleIncrement;
+      p.y += (Math.cos(p.d) + 3 + p.r/2) * 0.8;
+      p.x += Math.sin(p.d);
+      p.tilt = Math.sin(p.tiltAngle) * 12;
+      ctx.beginPath();
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x + p.tilt, p.y, p.r, p.r*0.6);
+      ctx.closePath();
+    }
+    confettiPieces = confettiPieces.filter(p => p.y < confettiCanvas.height + 50);
+    if(confettiPieces.length > 0) requestAnimationFrame(anim);
+  })();
+}
+
+/* --- accessibility: keyboard support for desktop --- */
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'r') restartGame();
+});
+
+/* init */
+buildBoard();
+restartBtn.addEventListener('click', restartGame);
+</script>
+</body>
+</html>
